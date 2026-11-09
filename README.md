@@ -1,25 +1,70 @@
-# End-to-End Water Quality ETL pipeline and BI
+# End-to-End Water Quality ETL Pipeline and BI
 
-![Water quality monitoring reference](docs/images/buoy.png)
+![Water quality monitoring buoy](docs/images/buoy.png)
 
-## What has been built
-An AWS serverless ETL pipeline that generates simulated water-quality telemetry,
-buffers it through Amazon SQS, persists it to Supabase PostgreSQL, and retains
-compressed raw payloads in Supabase Storage. The pipeline includes independent
-five-day retention policies for both database data and raw Storage backups.
+An event-driven, serverless data pipeline for simulated water-quality telemetry.
+The project generates sensor readings, reliably ingests them through Amazon SQS,
+stores curated data in Supabase PostgreSQL, preserves compressed raw payloads in
+Supabase Storage, and exposes operational and environmental insights through
+Grafana.
 
-- A telemetry generator Lambda that creates water-quality measurements for 25
-  stations over a five-minute collection window (125 readings per message).
-- An SQS-backed processor Lambda that validates and stores the readings.
-- A normalized Supabase PostgreSQL schema for stations, readings, alerts, and
-  processing audits.
-- Gzip-compressed raw-payload backups in the `raw-telemetry` Supabase Storage
-  bucket.
-- SQS retry protection through batch auditing and conflict-safe inserts.
-- A scheduled Storage cleanup Lambda that removes raw objects older than five
-  days.
-- A `pg_cron` SQL job that removes database readings and audit entries older
-  than five days.
+## Contents
+
+- [Project overview](#project-overview)
+- [Architecture](#architecture)
+- [End-to-end data flow](#end-to-end-data-flow)
+- [Pipeline components](#pipeline-components)
+- [Technologies used, in plain language](#technologies-used-in-plain-language)
+- [Data model](#data-model)
+- [Reliability and retention](#reliability-and-retention)
+- [Grafana dashboards](#grafana-dashboards)
+- [Local development and deployment](#local-development-and-deployment)
+- [Operations and security](#operations-and-security)
+- [Change log](#change-log)
+- [Scalability and scenarios](#scalability-and-scenarios)
+
+## Project overview
+
+### Goals
+
+- Simulate time-series telemetry from distributed water-quality stations.
+- Decouple data generation from processing with a durable queue.
+- Store raw and curated data separately for traceability and analytics.
+- Make message redelivery safe through idempotent writes.
+- Retain only the most recent five days of raw and relational data.
+- Visualize environmental readings and ingestion health in Grafana.
+
+### What the pipeline produces
+
+Each generated record includes a station identifier, region, event timestamp,
+status, and measurements for pH, dissolved oxygen, turbidity, temperature,
+specific conductance, and streamflow. A normal generator run produces 25
+stations across five collection minutes, resulting in 125 readings in one SQS
+message.
+
+```mermaid
+mindmap
+  root((Water Quality ETL))
+    Telemetry
+      pH
+      Dissolved oxygen
+      Turbidity
+      Temperature
+      Conductance
+      Streamflow
+    Reliability
+      Amazon SQS
+      Idempotent inserts
+      Dead-letter queue
+    Storage
+      Supabase PostgreSQL
+      Supabase Storage
+      Five-day retention
+    Analytics
+      Grafana dashboard
+      Time-series panels
+      Ingestion monitoring
+```
 
 ## Architecture
 
@@ -27,49 +72,131 @@ five-day retention policies for both database data and raw Storage backups.
 
 ```mermaid
 flowchart LR
-    SCH[EventBridge Scheduler\nDaily, 03:00 Asia/Kolkata] --> C[water-quality-storage-cleanup Lambda]
-    C -->|List, filter, delete objects older than 5 days| S[(Supabase Storage\nraw-telemetry)]
-    CRON[Supabase pg_cron\nDaily, 00:00 UTC] --> DB[(Supabase PostgreSQL)]
+    subgraph AWS[AWS]
+        GEN[Generator Lambda]
+        QUEUE[water-quality-queue]
+        PROC[Processor Lambda]
+        DLQ[water-quality-dlq]
+        CLEAN[Storage Cleanup Lambda]
+        SCHED[EventBridge Scheduler]
+    end
+
+    subgraph Supabase[Supabase]
+        PG[(PostgreSQL)]
+        STORE[(Storage: raw-telemetry)]
+        CRON[pg_cron]
+    end
+
+    GEN -->|JSON batch| QUEUE
+    QUEUE -->|One message per invocation| PROC
+    QUEUE -. failed after retries .-> DLQ
+    PROC -->|Curated readings and audit rows| PG
+    PROC -->|Compressed raw backup| STORE
+    SCHED -->|Daily trigger| CLEAN
+    CLEAN -->|Delete raw objects older than 5 days| STORE
+    CRON -->|Delete relational rows older than 5 days| PG
 ```
 
-## Message processing flow
+## End-to-end data flow
+
+### 1. Generate telemetry
+
+`src/generator.py` simulates realistic water-quality values and intentionally
+introduces anomalies and missing measurements for downstream testing. It sends
+the JSON array to Amazon SQS rather than invoking the processor directly.
+
+![Generator Lambda](docs/images/water-quality-generator-lambda.png)
+
+### 2. Buffer and decouple with SQS
+
+Amazon SQS absorbs bursts, separates producers from consumers, and retries
+failed processing. The processor event-source mapping is configured with a
+batch size of one so each invocation handles one 125-reading payload.
+
+![SQS queue](docs/images/water-quality-sqs-queue.png)
+
+### 3. Process and persist
+
+`src/processor.py` connects to the Supabase transaction pooler, checks the
+batch audit table, uploads a gzip raw-data backup, upserts station metadata,
+inserts readings, and records the completed batch. The function uses a 120
+second timeout and 256 MB memory allocation.
 
 ```mermaid
 sequenceDiagram
-    participant Generator as Generator Lambda
-    participant SQS as Amazon SQS
-    participant Processor as Processor Lambda
-    participant Storage as Supabase Storage
-    participant DB as Supabase PostgreSQL
+    participant G as Generator Lambda
+    participant Q as Amazon SQS
+    participant P as Processor Lambda
+    participant S as Supabase Storage
+    participant D as Supabase PostgreSQL
 
-    Generator->>SQS: Send JSON telemetry batch
-    SQS->>Processor: Deliver one queued message
-    Processor->>DB: Check pipeline_audit by message ID
-    alt Batch already processed
-        Processor-->>SQS: Successful completion without duplicate work
-    else New batch
-        Processor->>Storage: Upload compressed raw JSON backup
-        loop Each reading
-            Processor->>DB: Upsert dim_station
-            Processor->>DB: Insert reading, ignore duplicate event ID
+    G->>Q: Send one JSON telemetry batch
+    Q->>P: Deliver one SQS message
+    P->>D: Look up message ID in pipeline_audit
+    alt Audit row exists
+        P-->>Q: Complete without duplicate work
+    else New message
+        P->>S: Upload compressed raw JSON backup
+        loop Each telemetry reading
+            P->>D: Upsert station metadata
+            P->>D: Insert reading if event ID is new
         end
-        Processor->>DB: Insert audit record, ignore duplicate batch ID
-        Processor-->>SQS: Successful completion
+        P->>D: Insert audit row if batch ID is new
+        P-->>Q: Complete successfully
     end
 ```
 
-## Repository layout
+### 4. Serve analytics
 
-| Path | Purpose |
-|---|---|
-| `src/generator.py` | Creates simulated telemetry and publishes a batch to SQS. |
-| `src/processor.py` | SQS consumer that uploads raw backups and writes normalized data to Supabase. |
-| `src/storage_cleanup.py` | Separate scheduled Lambda that removes Storage objects older than five days. |
-| `sql/schema.sql` | Database tables and indexes. |
-| `sql/rolling-cron-job.sql` | Supabase `pg_cron` job for database retention. |
-| `deploy_processor.bat` | Builds and deploys the processor Lambda. |
-| `cleanup_env.example.json` | Safe template for the cleanup Lambda environment. |
-| `requirements.txt` | Pinned Python runtime and development dependencies. |
+Grafana connects through the Supabase **session pooler** on port `5432`. The
+processor uses port `6543` because it is a short-lived serverless client;
+Grafana uses the session pooler because it maintains database connections for
+interactive dashboards.
+
+```mermaid
+flowchart LR
+    DB[(Supabase PostgreSQL)] -->|Session pooler :5432| GRAF[Grafana PostgreSQL data source]
+    GRAF --> DASH[Water Quality Dashboard]
+    DASH --> ENV[Environmental metrics]
+    DASH --> OPS[Ingestion and pipeline health]
+```
+
+## Pipeline components
+
+| Component | Responsibility | Key behavior |
+|---|---|---|
+| Generator Lambda | Produces simulated sensor batches | Generates 125 readings per run and sends one message to SQS. |
+| SQS queue | Buffers telemetry and retries failures | Batch size 1, visibility timeout 720 seconds, DLQ after configured retries. |
+| Processor Lambda | Performs the ETL workflow | Uploads raw backup, writes curated rows, and records audit status. |
+| Supabase PostgreSQL | Stores query-ready telemetry | Normalized schema with time-series indexes. |
+| Supabase Storage | Stores immutable raw backups | Each SQS body is gzip-compressed and stored in `raw-telemetry`. |
+| Cleanup Lambda | Enforces raw-object retention | Daily scheduled deletion of objects older than five days. |
+| Supabase `pg_cron` | Enforces relational-data retention | Daily deletion of expired readings and audit rows. |
+| Grafana | Visualizes data and operational behavior | PostgreSQL data source and public dashboard. |
+
+## Technologies used, in plain language
+
+This section explains the platform without assuming data-engineering experience.
+
+| Technology | What it is | Why this project uses it |
+|---|---|---|
+| **Python** | A general-purpose programming language that is popular for automation and data work. | It powers the generator, processor, and cleanup functions. |
+| **AWS Lambda** | Serverless compute: AWS runs small pieces of code only when they are needed. | The project does not need to run or maintain application servers continuously. |
+| **Amazon SQS** | A managed message queue. Think of it as a durable waiting line between two systems. | It lets telemetry generation continue even if processing is temporarily slow or unavailable. |
+| **Dead-letter queue (DLQ)** | A separate queue for messages that repeatedly fail processing. | It prevents one bad message from blocking the normal queue and preserves it for investigation. |
+| **Supabase PostgreSQL** | A managed relational database based on PostgreSQL. Relational databases store structured records in linked tables. | It holds query-ready station, reading, and audit data for analytics and dashboards. |
+| **Supabase Storage** | Managed object storage for files rather than database rows. | It preserves the original telemetry payload as a compressed backup before transformation. |
+| **EventBridge Scheduler** | AWS's managed clock for running a task on a timetable. | It invokes the Storage cleanup Lambda once each day. |
+| **Supabase `pg_cron`** | A PostgreSQL extension that schedules SQL commands inside the database. | It removes expired readings and audit records without requiring another application server. |
+| **Grafana** | A visualization and dashboard platform for time-series and operational data. | It turns stored measurements into charts, tables, and ingestion-health panels. |
+| **Gzip** | A file-compression format that reduces storage size. | Raw JSON messages are compressed before being saved to Supabase Storage. |
+| **pg8000** | A pure-Python PostgreSQL database driver. A driver is the library an application uses to speak to a database. | The processor uses it to write telemetry to Supabase PostgreSQL from Lambda. |
+
+> **About Parquet:** Parquet is a column-oriented file format commonly used for
+> large-scale analytics because it is efficient for reading selected columns.
+> This project does **not** currently use Parquet; raw payloads are stored as
+> gzip-compressed JSON. Parquet would be a sensible future option if long-term
+> historical data were exported to a data lake for large analytical workloads.
 
 ## Data model
 
@@ -101,6 +228,7 @@ erDiagram
         timestamptz processed_at
         int records_processed
         varchar status
+        text error_message
     }
     FACT_ALERTS {
         uuid alert_id PK
@@ -108,39 +236,172 @@ erDiagram
         timestamptz event_timestamp
         varchar parameter_name
         varchar alert_severity
+        numeric reading_value
     }
 ```
 
-## Configuration
+### Supabase tables
 
-The processor Lambda requires the following environment variables:
+#### `dim_station`
 
-| Variable | Description |
+Station dimension data is inserted with `ON CONFLICT DO NOTHING`, allowing
+many readings from the same station without duplicate metadata rows.
+
+![Station dimension](docs/images/dim-station.png)
+
+#### `water_quality_readings`
+
+The fact table contains one row per telemetry event. `event_id` is the primary
+key and makes repeated SQS deliveries harmless.
+
+![Water quality readings](docs/images/water-quality-readings.png)
+
+#### `pipeline_audit`
+
+The audit table records completed SQS batches using the SQS message ID as the
+primary key. It provides observability and prevents already-completed batches
+from being processed again.
+
+![Pipeline audit](docs/images/pipeline-audit.png)
+
+## Reliability and retention
+
+### Idempotency and retry behavior
+
+SQS uses at-least-once delivery. A message can be delivered more than once,
+particularly after a timeout or transient downstream failure. The processor
+handles this safely in three layers:
+
+1. It checks `pipeline_audit` before beginning work.
+2. It ignores duplicate `event_id` values when inserting readings.
+3. It ignores duplicate `batch_id` values when recording audit completion.
+
+```mermaid
+flowchart TD
+    RECEIVE[Receive SQS message] --> CHECK{Batch ID already audited?}
+    CHECK -->|Yes| ACK[Return success]
+    CHECK -->|No| BACKUP[Upload raw backup]
+    BACKUP --> WRITE[Write station and reading records]
+    WRITE --> AUDIT[Write audit record]
+    AUDIT --> ACK
+    WRITE -. unrecoverable failure .-> RETRY[SQS retry]
+    RETRY -. max receives exceeded .-> DLQ[Dead-letter queue]
+```
+
+### Five-day retention policy
+
+Raw and relational data are retained independently so each storage layer can
+be managed according to its purpose.
+
+```mermaid
+flowchart TB
+    RAW[Supabase Storage raw objects] -->|created_at older than 5 days| CLEAN[Cleanup Lambda]
+    CLEAN --> DELETE_RAW[Delete object paths]
+    REL[PostgreSQL readings and audit rows] -->|older than 5 days| CRON[Supabase pg_cron]
+    CRON --> DELETE_REL[Delete relational rows]
+```
+
+#### Raw Storage retention
+
+`src/storage_cleanup.py` is deployed as
+`water-quality-storage-cleanup`. EventBridge Scheduler invokes it every day at
+03:00 in `Asia/Kolkata`. The handler paginates through the `raw-telemetry`
+bucket, filters by `created_at`, and deletes eligible paths in batches of up to
+1,000.
+
+![Storage cleanup Lambda](docs/images/lambda-storage-cleanup.png)
+
+#### Relational-data retention
+
+Run [`sql/rolling-cron-job.sql`](sql/rolling-cron-job.sql) once in the Supabase
+SQL Editor. It enables `pg_cron` and schedules daily cleanup at midnight UTC:
+
+- `water_quality_readings` are removed when `event_timestamp` is older than
+  five days.
+- `pipeline_audit` records are removed when `processed_at` is older than five
+  days.
+
+> The supplied SQL intentionally retains `dim_station` and `fact_alerts`.
+> Adjust the SQL if those tables require the same retention policy.
+
+## Grafana dashboards
+
+![Grafana water-quality dashboard](docs/images/dashboard.png)
+
+The Grafana dashboard turns the curated PostgreSQL table into a live view of
+water quality and pipeline activity. It is intended for both environmental
+monitoring and operational validation after each ingestion run.
+
+### Data-source configuration
+
+Use the Supabase **shared session pooler** in Grafana:
+
+| Field | Value |
 |---|---|
-| `SUPABASE_DB_URI` | Supabase **transaction pooler** URI, using port `6543`. |
-| `SUPABASE_URL` | Supabase project URL. |
-| `SUPABASE_SERVICE_KEY` | Server-side key used to write raw backups to Storage. |
+| Host URL | `aws-0-ap-southeast-1.pooler.supabase.com:5432` |
+| Database | `postgres` |
+| Username | `postgres.<project-ref>` |
+| Password | Current Supabase database password in plain text, not a URI. |
+| TLS/SSL mode | `require` |
 
-The cleanup Lambda requires only `SUPABASE_URL` and
-`SUPABASE_SERVICE_KEY`. Create `cleanup_env.json` from
-`cleanup_env.example.json`; it is intentionally ignored by Git.
+Use the exact Session pooler host and username copied from the Supabase Connect
+dialog for the project. Do not use the processor Lambda transaction-pooler
+configuration (`:6543`) in Grafana.
 
-The generator requires `SQS_QUEUE_URL`. When running locally, it also uses
-`AWS_REGION` if set.
+### Useful panels and queries
 
-> Never commit `.env`, `update_env.json`, `env_pooler.json`, or
-> `cleanup_env.json`. They contain runtime secrets and are excluded by
-> `.gitignore`.
+**pH over time by station**
 
-## Initial database setup
+```sql
+SELECT
+  event_timestamp AS "time",
+  ph AS "value",
+  station_id AS "metric"
+FROM water_quality_readings
+WHERE $__timeFilter(event_timestamp)
+ORDER BY 1;
+```
 
-Run [`sql/schema.sql`](sql/schema.sql) in the Supabase SQL Editor before
-processing messages. It creates the dimension, fact, and audit tables along
-with indexes for time-series and station queries.
+**Readings ingested per minute**
 
-## Running locally
+```sql
+SELECT
+  date_trunc('minute', ingested_at) AS "time",
+  count(*) AS "value"
+FROM water_quality_readings
+WHERE $__timeFilter(ingested_at)
+GROUP BY 1
+ORDER BY 1;
+```
 
-Create and activate a virtual environment, then install dependencies:
+**Latest station status**
+
+```sql
+SELECT DISTINCT ON (station_id)
+  station_id,
+  status,
+  event_timestamp,
+  ph,
+  turbidity,
+  dissolved_oxygen
+FROM water_quality_readings
+ORDER BY station_id, event_timestamp DESC;
+```
+
+### Public dashboard
+
+[Open the Water Quality Grafana Dashboard](https://sereneiris1223.grafana.net/public-dashboards/f9fb0a33a28f43ac878b03267ebce7d3)
+
+## Local development and deployment
+
+### Prerequisites
+
+- Python 3.12
+- AWS CLI configured for `ap-south-1`
+- A Supabase project with the schema applied
+- A Grafana Cloud account or self-hosted Grafana instance
+
+### Install dependencies
 
 ```cmd
 python -m venv venv
@@ -148,130 +409,89 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-To generate and send a test batch, make sure `.env` contains a valid
-`SQS_QUEUE_URL`, then run:
+### Environment variables
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `SQS_QUEUE_URL` | Generator | Queue destination for telemetry batches. |
+| `AWS_REGION` | Generator | AWS region for the SQS client. |
+| `SUPABASE_DB_URI` | Processor | Transaction-pooler connection URI. |
+| `SUPABASE_URL` | Processor and cleanup | Supabase project URL. |
+| `SUPABASE_SERVICE_KEY` | Processor and cleanup | Server-side Storage API credential. |
+
+Copy `cleanup_env.example.json` to `cleanup_env.json` before deploying the
+cleanup Lambda. Keep all live environment files out of version control.
+
+### Generate a test batch
 
 ```cmd
 python src\generator.py
 ```
 
-To run the Storage cleanup locally, make sure `.env` contains `SUPABASE_URL`
-and `SUPABASE_SERVICE_KEY`:
-
-```cmd
-python -c "from dotenv import load_dotenv; load_dotenv(); from src.storage_cleanup import lambda_handler; print(lambda_handler({}, None))"
-```
-
-This cleanup command permanently deletes raw Storage objects older than five
-days.
-
-## Processor deployment
-
-`deploy_processor.bat` packages the compatible database driver set,
-uploads the ZIP to `water-quality-processor`, waits for the update, and applies
-the environment configuration from `update_env.json`.
+### Deploy the processor
 
 ```cmd
 deploy_processor.bat
 ```
 
-The deployed processor uses these operational settings:
+The deployment script builds the dependency package, publishes the processor
+ZIP, waits for Lambda to finish updating, and applies `update_env.json`.
 
-| Setting | Value | Reason |
-|---|---:|---|
-| Lambda timeout | 120 seconds | A 125-reading message performs many database writes. |
-| Lambda memory | 256 MB | Provides additional CPU/network capacity while retaining a small footprint. |
-| SQS batch size | 1 | Avoids processing up to ten 125-reading messages in one invocation. |
-| SQS visibility timeout | 720 seconds | Prevents concurrent redelivery while an invocation is still running. |
-
-## Five-day retention
-
-### Raw Storage retention
-
-`src/storage_cleanup.py` is deployed as the
-`water-quality-storage-cleanup` Lambda. Its EventBridge Scheduler schedule,
-`water-quality-storage-cleanup-daily`, runs at 03:00 in `Asia/Kolkata`.
-
-The handler paginates through `raw-telemetry`, compares each object’s
-`created_at` time to a five-day UTC cutoff, and deletes eligible paths in
-batches of at most 1,000.
-
-### Database retention
-
-Run [`sql/rolling-cron-job.sql`](sql/rolling-cron-job.sql) once in the
-Supabase SQL Editor to enable its `pg_cron` schedule. It runs daily at midnight
-UTC and deletes:
-
-- `water_quality_readings` where `event_timestamp` is older than five days.
-- `pipeline_audit` entries where `processed_at` is older than five days.
-
-Storage retention and database retention are intentionally independent: one
-removes raw backups, while the other removes relational telemetry and audit
-history.
-
-## Reliability and idempotency
-
-Amazon SQS provides at-least-once delivery. The processor therefore handles
-duplicates in two layers:
-
-1. It checks `pipeline_audit` using the SQS message ID before processing.
-2. It uses `ON CONFLICT DO NOTHING` for both `event_id` and `batch_id` inserts.
-
-This prevents duplicate deliveries from failing the function when a prior
-attempt already committed the data.
-
-Failed messages are retried by SQS and then routed to
-`water-quality-dlq` after the configured maximum receive count. Redrive DLQ
-messages only after confirming healthy processor logs.
-
-## Verification and operations
-
-Tail the processor logs:
+### Verify pipeline health
 
 ```cmd
 aws logs tail /aws/lambda/water-quality-processor --region ap-south-1 --since 10m
 ```
 
-Check recent ingested readings in Supabase:
-
 ```sql
-select count(*) as readings, max(ingested_at) as latest_ingestion
-from water_quality_readings;
+SELECT
+  count(*) AS readings,
+  max(ingested_at) AS latest_ingestion
+FROM water_quality_readings;
 ```
 
-Check cleanup Lambda logs:
+## Operations and security
 
-```cmd
-aws logs tail /aws/lambda/water-quality-storage-cleanup --region ap-south-1 --since 10m
+- Store credentials only in ignored environment files or a managed secret
+  store. Rotate a password or service key immediately if it is exposed.
+- Copy the Supabase pooler hostname from the Connect dialog; do not construct
+  it from a cloud region name.
+- URL-encode reserved characters only when placing a password in a database
+  URI. Grafana's password field expects the plain password.
+- The cleanup Lambda deliberately receives no database URI because it only
+  manages Supabase Storage.
+- Failed processor messages land in `water-quality-dlq` after the configured
+  SQS retry threshold. Redrive them only after the processor is healthy.
+- The processor currently disables TLS certificate and hostname verification
+  for the pooler. Replace that temporary workaround with CA validation before
+  a production deployment.
+
+## Scalability and scenarios
+
+### Scaling path
+
+```mermaid
+flowchart LR
+    LOW[Current: low to moderate load] --> MED[Higher message volume]
+    MED --> HIGH[High-throughput production workload]
+
+    LOW --- L1[One-message SQS batches\nPer-row inserts\nSingle dashboard]
+    MED --- L2[Increase Lambda memory\nTune SQS concurrency\nBatch database writes]
+    HIGH --- L3[Use bulk COPY or batched inserts\nPartition time-series tables\nAdd queue alarms and DLQ redrive automation]
 ```
 
-## Security notes
+| Scenario | Expected behavior | Recommended evolution |
+|---|---|---|
+| Normal station telemetry | One 125-reading batch is processed in a single Lambda invocation. | Keep SQS batch size at one and monitor duration. |
+| Short traffic burst | SQS stores backlog while Lambda scales consumers. | Increase event-source maximum concurrency only after validating Supabase connection limits. |
+| Duplicate SQS delivery | Existing event and batch keys are ignored. | Retain the current idempotent constraints and audit table. |
+| Slow database writes | Lambda duration increases because inserts are per row. | Move to `executemany`, multi-row inserts, or PostgreSQL `COPY`. |
+| Millions of readings | Retention deletes become more expensive and dashboards scan more data. | Partition by event time, retain rollups, and add summary tables or materialized views. |
+| Dashboard growth | More users open concurrent Grafana panels. | Create a dedicated read-only Grafana role and tune session-pooler connection limits. |
+| Long-term analytics | Five-day operational retention is insufficient. | Export raw files to low-cost object storage and build an analytical warehouse or lakehouse layer. |
 
-- Use the Supabase transaction-pooler endpoint copied directly from the
-  Supabase Connect dialog. Do not construct the pooler region or host manually.
-- URL-encode reserved characters in database passwords when placing them in a
-  connection URI.
-- Rotate a password or service key immediately if it is exposed in a terminal,
-  commit, or chat transcript.
-- The current processor disables TLS certificate and hostname verification for
-  the Supabase pooler. Replace this with CA validation before a production
-  deployment.
-- The cleanup function has no need for the database URI; keep its environment
-  limited to the Storage URL and service key.
-
-## Change log
-
-### 2026-11-09
-
-- Added the SQS-to-Supabase processor Lambda and deployment script.
-- Pinned `pg8000==1.30.5` with `scramp==1.4.4` to avoid an incompatible
-  channel-binding API change.
-- Switched database access to the Supabase transaction pooler configuration.
-- Added duplicate-safe reading and audit inserts for SQS retry behavior.
-- Increased the processor timeout and reduced SQS processing to one message per
-  invocation.
-- Added the daily Storage cleanup Lambda with five-day raw-data retention.
-- Added the `pg_cron` SQL job for five-day relational-data retention.
-- Added secret and generated-artifact exclusions to `.gitignore`.
-
-[Grafana Dashboard](https://sereneiris1223.grafana.net/public-dashboards/f9fb0a33a28f43ac878b03267ebce7d3)
+The current architecture is intentionally optimized for a small operational
+telemetry workload. SQS provides the buffer for burst absorption, while the
+database and Storage layers remain independently scalable. The next major
+performance improvement is replacing per-row database calls with bulk writes;
+that reduces latency, lowers Lambda cost, and enables higher SQS concurrency.
