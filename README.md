@@ -14,6 +14,7 @@ Grafana.
 - [Architecture](#architecture)
 - [End-to-end data flow](#end-to-end-data-flow)
 - [Pipeline components](#pipeline-components)
+- [Repository structure](#repository-structure)
 - [Technologies used, in plain language](#technologies-used-in-plain-language)
 - [Data model](#data-model)
 - [Reliability and retention](#reliability-and-retention)
@@ -173,6 +174,63 @@ flowchart LR
 | Cleanup Lambda | Enforces raw-object retention | Daily scheduled deletion of objects older than five days. |
 | Supabase `pg_cron` | Enforces relational-data retention | Daily deletion of expired readings and audit rows. |
 | Grafana | Visualizes data and operational behavior | PostgreSQL data source and public dashboard. |
+
+## Repository structure
+
+The project keeps runtime code, database scripts, deployment configuration, and
+documentation separate so the pipeline is easier to operate and extend.
+
+```text
+water-quality-etl/
+├── 📄 README.md
+├── 📄 requirements.txt
+├── 📄 .gitignore
+├── 🚀 deploy_processor.bat
+├── ⚙️ update_env.json
+├── ⚙️ cleanup_env.example.json
+├── ⚙️ attributes.json
+├── ⚙️ targets.json
+├── 🔐 trust-policy.json
+├── 🧪 response.json
+├── 📂 src/
+│   ├── 🐍 generator.py
+│   ├── 🐍 processor.py
+│   └── 🐍 storage_cleanup.py
+├── 📂 sql/
+│   ├── 🗃️ schema.sql
+│   └── 🧹 rolling-cron-job.sql
+└── 📂 docs/images/
+    ├── 🖼️ buoy.png
+    ├── 🖼️ arch-diagram.png
+    ├── 🖼️ dashboard.png
+    ├── 🖼️ water-quality-generator-lambda.png
+    ├── 🖼️ water-quality-sqs-queue.png
+    ├── 🖼️ water-quality-readings.png
+    ├── 🖼️ dim-station.png
+    ├── 🖼️ pipeline-audit.png
+    └── 🖼️ lambda-storage-cleanup.png
+```
+
+| File or directory | Use |
+|---|---|
+| 📄 `README.md` | Project guide: architecture, setup, operations, dashboard queries, and scaling notes. |
+| 📄 `requirements.txt` | Pins the Python dependencies needed for local work and Lambda packaging. |
+| 📄 `.gitignore` | Prevents virtual environments, secrets, deployment bundles, and generated outputs from being committed. |
+| 🚀 `deploy_processor.bat` | Packages `processor.py` with its dependencies and updates the processor Lambda. |
+| ⚙️ `update_env.json` | Local AWS CLI input for processor environment variables. It is ignored because it contains secrets. |
+| ⚙️ `cleanup_env.example.json` | Safe template showing the environment-variable names required by the cleanup Lambda. |
+| ⚙️ `attributes.json` | AWS SQS configuration input, including the dead-letter queue redrive policy. |
+| ⚙️ `targets.json` | AWS CLI target definition used when connecting a scheduled trigger to a Lambda. |
+| 🔐 `trust-policy.json` | IAM trust policy that allows the configured AWS service to assume its execution role. |
+| 🧪 `response.json` | Sample Lambda invocation response used to verify message generation. |
+| 📂 `src/` | Python source code for the three Lambda responsibilities. |
+| 🐍 `src/generator.py` | Simulates 125 water-quality readings per run and sends the batch to Amazon SQS. |
+| 🐍 `src/processor.py` | Main ETL consumer: backs up raw JSON, upserts stations, writes readings, and records processing audit data. |
+| 🐍 `src/storage_cleanup.py` | Scheduled retention worker that deletes raw Supabase Storage objects older than five days. |
+| 📂 `sql/` | SQL scripts that create and maintain the Supabase PostgreSQL data layer. |
+| 🗃️ `sql/schema.sql` | Creates the station, telemetry, alert, and audit tables, along with their indexes and constraints. |
+| 🧹 `sql/rolling-cron-job.sql` | Creates the Supabase `pg_cron` task that removes expired relational data each day. |
+| 📂 `docs/images/` | Visual assets embedded in this README, including AWS, Supabase, and Grafana evidence screenshots. |
 
 ## Technologies used, in plain language
 
