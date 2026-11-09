@@ -1,0 +1,11 @@
+# AWS SDK for Python
+boto3==1.34.14
+
+# PostgreSQL adapter
+psycopg2-binary==2.9.9
+
+# Date and time manipulation
+python-dateutil==2.8.2
+
+# Testing
+pytest==8.0.0
