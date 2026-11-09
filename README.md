@@ -273,3 +273,5 @@ aws logs tail /aws/lambda/water-quality-storage-cleanup --region ap-south-1 --si
 - Added the daily Storage cleanup Lambda with five-day raw-data retention.
 - Added the `pg_cron` SQL job for five-day relational-data retention.
 - Added secret and generated-artifact exclusions to `.gitignore`.
+
+[Grafana Dashboard](https://sereneiris1223.grafana.net/public-dashboards/f9fb0a33a28f43ac878b03267ebce7d3)
