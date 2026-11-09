@@ -2,6 +2,8 @@
 venv/
 env/
 .env
+update_env.json
+env_pooler.json
 
 # Python caches
 __pycache__/
@@ -15,3 +17,8 @@ __pycache__/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Generated deployment and command output
+deploy_package/
+processor.zip
+out.json
