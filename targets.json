@@ -1,0 +1,6 @@
+[
+  {
+    "Id": "1",
+    "Arn": "arn:aws:lambda:ap-south-1:611708420475:function:water-quality-generator"
+  }
+]
