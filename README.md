@@ -14,14 +14,12 @@ Grafana.
 - [Architecture](#architecture)
 - [End-to-end data flow](#end-to-end-data-flow)
 - [Pipeline components](#pipeline-components)
-- [Repository structure](#repository-structure)
 - [Technologies used, in plain language](#technologies-used-in-plain-language)
 - [Data model](#data-model)
 - [Reliability and retention](#reliability-and-retention)
 - [Grafana dashboards](#grafana-dashboards)
 - [Local development and deployment](#local-development-and-deployment)
 - [Operations and security](#operations-and-security)
-- [Change log](#change-log)
 - [Scalability and scenarios](#scalability-and-scenarios)
 
 ## Project overview
@@ -162,54 +160,10 @@ flowchart LR
     DASH --> OPS[Ingestion and pipeline health]
 ```
 
-## Pipeline components
-
-| Component | Responsibility | Key behavior |
-|---|---|---|
-| Generator Lambda | Produces simulated sensor batches | Generates 125 readings per run and sends one message to SQS. |
-| SQS queue | Buffers telemetry and retries failures | Batch size 1, visibility timeout 720 seconds, DLQ after configured retries. |
-| Processor Lambda | Performs the ETL workflow | Uploads raw backup, writes curated rows, and records audit status. |
-| Supabase PostgreSQL | Stores query-ready telemetry | Normalized schema with time-series indexes. |
-| Supabase Storage | Stores immutable raw backups | Each SQS body is gzip-compressed and stored in `raw-telemetry`. |
-| Cleanup Lambda | Enforces raw-object retention | Daily scheduled deletion of objects older than five days. |
-| Supabase `pg_cron` | Enforces relational-data retention | Daily deletion of expired readings and audit rows. |
-| Grafana | Visualizes data and operational behavior | PostgreSQL data source and public dashboard. |
-
-## Repository structure
+### 5. Repository structure
 
 The project keeps runtime code, database scripts, deployment configuration, and
 documentation separate so the pipeline is easier to operate and extend.
-
-```text
-water-quality-etl/
-├── 📄 README.md
-├── 📄 requirements.txt
-├── 📄 .gitignore
-├── 🚀 deploy_processor.bat
-├── ⚙️ update_env.json
-├── ⚙️ cleanup_env.example.json
-├── ⚙️ attributes.json
-├── ⚙️ targets.json
-├── 🔐 trust-policy.json
-├── 🧪 response.json
-├── 📂 src/
-│   ├── 🐍 generator.py
-│   ├── 🐍 processor.py
-│   └── 🐍 storage_cleanup.py
-├── 📂 sql/
-│   ├── 🗃️ schema.sql
-│   └── 🧹 rolling-cron-job.sql
-└── 📂 docs/images/
-    ├── 🖼️ buoy.png
-    ├── 🖼️ arch-diagram.png
-    ├── 🖼️ dashboard.png
-    ├── 🖼️ water-quality-generator-lambda.png
-    ├── 🖼️ water-quality-sqs-queue.png
-    ├── 🖼️ water-quality-readings.png
-    ├── 🖼️ dim-station.png
-    ├── 🖼️ pipeline-audit.png
-    └── 🖼️ lambda-storage-cleanup.png
-```
 
 | File or directory | Use |
 |---|---|
@@ -231,6 +185,18 @@ water-quality-etl/
 | 🗃️ `sql/schema.sql` | Creates the station, telemetry, alert, and audit tables, along with their indexes and constraints. |
 | 🧹 `sql/rolling-cron-job.sql` | Creates the Supabase `pg_cron` task that removes expired relational data each day. |
 | 📂 `docs/images/` | Visual assets embedded in this README, including AWS, Supabase, and Grafana evidence screenshots. |
+## Pipeline components
+
+| Component | Responsibility | Key behavior |
+|---|---|---|
+| Generator Lambda | Produces simulated sensor batches | Generates 125 readings per run and sends one message to SQS. |
+| SQS queue | Buffers telemetry and retries failures | Batch size 1, visibility timeout 720 seconds, DLQ after configured retries. |
+| Processor Lambda | Performs the ETL workflow | Uploads raw backup, writes curated rows, and records audit status. |
+| Supabase PostgreSQL | Stores query-ready telemetry | Normalized schema with time-series indexes. |
+| Supabase Storage | Stores immutable raw backups | Each SQS body is gzip-compressed and stored in `raw-telemetry`. |
+| Cleanup Lambda | Enforces raw-object retention | Daily scheduled deletion of objects older than five days. |
+| Supabase `pg_cron` | Enforces relational-data retention | Daily deletion of expired readings and audit rows. |
+| Grafana | Visualizes data and operational behavior | PostgreSQL data source and public dashboard. |
 
 ## Technologies used, in plain language
 
