@@ -4,6 +4,7 @@ env/
 .env
 update_env.json
 env_pooler.json
+cleanup_env.json
 
 # Python caches
 __pycache__/

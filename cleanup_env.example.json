@@ -1,0 +1,6 @@
+{
+  "Variables": {
+    "SUPABASE_URL": "https://your-project-ref.supabase.co",
+    "SUPABASE_SERVICE_KEY": "your-service-key"
+  }
+}
