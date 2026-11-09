@@ -1,13 +1,12 @@
-# Water Quality ETL Pipeline
+# End-to-End Water Quality ETL pipeline and BI
 
-![Water quality monitoring reference](docs/images/stream-river-guage-reference.png)
+![Water quality monitoring reference](docs/images/buoy.png)
 
+## What has been built
 An AWS serverless ETL pipeline that generates simulated water-quality telemetry,
 buffers it through Amazon SQS, persists it to Supabase PostgreSQL, and retains
 compressed raw payloads in Supabase Storage. The pipeline includes independent
 five-day retention policies for both database data and raw Storage backups.
-
-## What has been built
 
 - A telemetry generator Lambda that creates water-quality measurements for 25
   stations over a five-minute collection window (125 readings per message).
