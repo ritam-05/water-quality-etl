@@ -1,5 +1,7 @@
 # Water Quality ETL Pipeline
 
+![Water quality monitoring reference](docs/images/stream-river-guage-reference.png)
+
 An AWS serverless ETL pipeline that generates simulated water-quality telemetry,
 buffers it through Amazon SQS, persists it to Supabase PostgreSQL, and retains
 compressed raw payloads in Supabase Storage. The pipeline includes independent
@@ -22,14 +24,7 @@ five-day retention policies for both database data and raw Storage backups.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    G[water-quality-generator Lambda] -->|125-reading JSON message| Q[Amazon SQS\nwater-quality-queue]
-    Q -->|Batch size: 1| P[water-quality-processor Lambda]
-    P -->|Upsert station + insert reading| DB[(Supabase PostgreSQL)]
-    P -->|Gzip raw payload| S[(Supabase Storage\nraw-telemetry)]
-    Q -. failed delivery after retries .-> DLQ[Amazon SQS\nwater-quality-dlq]
-```
+![Water Quality ETL architecture](docs/images/arch-diagram.png)
 
 ```mermaid
 flowchart LR
