@@ -350,42 +350,66 @@ configuration (`:6543`) in Grafana.
 
 ### Useful panels and queries
 
-**pH over time by station**
+#### 1. Water Quality Metrics — time-series line chart
 
 ```sql
 SELECT
   event_timestamp AS "time",
-  ph AS "value",
-  station_id AS "metric"
+  ph AS "pH Level",
+  turbidity AS "Turbidity"
 FROM water_quality_readings
 WHERE $__timeFilter(event_timestamp)
-ORDER BY 1;
+ORDER BY event_timestamp ASC;
 ```
 
-**Readings ingested per minute**
+#### 2. Latest current readings — stat or gauge cards
 
 ```sql
 SELECT
-  date_trunc('minute', ingested_at) AS "time",
-  count(*) AS "value"
+  COALESCE(ph, 0) AS "Current pH",
+  COALESCE(turbidity, 0) AS "Current Turbidity",
+  COALESCE(temperature, 0) AS "Current Temp"
 FROM water_quality_readings
-WHERE $__timeFilter(ingested_at)
-GROUP BY 1
-ORDER BY 1;
+ORDER BY event_timestamp DESC
+LIMIT 1;
 ```
 
-**Latest station status**
+#### 3. Temperature and dissolved oxygen — time-series line chart
 
 ```sql
-SELECT DISTINCT ON (station_id)
-  station_id,
-  status,
-  event_timestamp,
-  ph,
-  turbidity,
-  dissolved_oxygen
+SELECT
+  event_timestamp AS "time",
+  temperature AS "Temperature",
+  dissolved_oxygen AS "Dissolved Oxygen"
 FROM water_quality_readings
-ORDER BY station_id, event_timestamp DESC;
+WHERE $__timeFilter(event_timestamp)
+ORDER BY event_timestamp ASC;
+```
+
+#### 4. Critical alerts and anomalies — table
+
+```sql
+SELECT
+  event_timestamp AS "Time",
+  station_id AS "Station ID",
+  ph AS "pH Level",
+  turbidity AS "Turbidity"
+FROM water_quality_readings
+WHERE ph < 6.5 OR ph > 8.5 OR turbidity > 15
+ORDER BY event_timestamp DESC
+LIMIT 10;
+```
+
+#### 5. Streamflow and conductance — filled area chart
+
+```sql
+SELECT
+  event_timestamp AS "time",
+  streamflow AS "Streamflow (cfs)",
+  specific_conductance AS "Conductance"
+FROM water_quality_readings
+WHERE $__timeFilter(event_timestamp)
+ORDER BY event_timestamp ASC;
 ```
 
 ### Public dashboard
