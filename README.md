@@ -17,7 +17,7 @@ Grafana.
 - [Technologies used, in plain language](#technologies-used-in-plain-language)
 - [Data model](#data-model)
 - [Reliability and retention](#reliability-and-retention)
-- [Grafana dashboards](#grafana-dashboards)
+- [Data Visualization](#data-visualization---bi-layer)
 - [Local development and deployment](#local-development-and-deployment)
 - [Operations and security](#operations-and-security)
 - [Scalability and scenarios](#scalability-and-scenarios)
@@ -348,7 +348,9 @@ SQL Editor. It enables `pg_cron` and schedules daily cleanup at midnight UTC:
 > The supplied SQL intentionally retains `dim_station` and `fact_alerts`.
 > Adjust the SQL if those tables require the same retention policy.
 
-## Grafana dashboards
+## Data Visualization - BI Layer 
+
+Snapshot:
 
 ![Grafana water-quality dashboard](docs/images/dashboard.png)
 
