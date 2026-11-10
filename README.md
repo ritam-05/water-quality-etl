@@ -348,7 +348,7 @@ SQL Editor. It enables `pg_cron` and schedules daily cleanup at midnight UTC:
 > The supplied SQL intentionally retains `dim_station` and `fact_alerts`.
 > Adjust the SQL if those tables require the same retention policy.
 
-## Grafana dashboards
+## Data Visualization - BI Layer
 
 Grafana turns the curated PostgreSQL table into two complementary views: an
 operational control centre for the latest pipeline data and an analytical
