@@ -348,15 +348,12 @@ SQL Editor. It enables `pg_cron` and schedules daily cleanup at midnight UTC:
 > The supplied SQL intentionally retains `dim_station` and `fact_alerts`.
 > Adjust the SQL if those tables require the same retention policy.
 
-## Data Visualization - BI Layer 
+## Grafana dashboards
 
-Snapshot:
-
-![Grafana water-quality dashboard](docs/images/dashboard.png)
-
-The Grafana dashboard turns the curated PostgreSQL table into a live view of
-water quality and pipeline activity. It is intended for both environmental
-monitoring and operational validation after each ingestion run.
+Grafana turns the curated PostgreSQL table into two complementary views: an
+operational control centre for the latest pipeline data and an analytical
+workspace for environmental diagnostics. All panel SQL is versioned in
+[`sql/dashboard-queries.sql`](sql/dashboard-queries.sql).
 
 ### Data-source configuration
 
@@ -374,73 +371,59 @@ Use the exact Session pooler host and username copied from the Supabase Connect
 dialog for the project. Do not use the processor Lambda transaction-pooler
 configuration (`:6543`) in Grafana.
 
-### Useful panels and queries
+### Dashboard 1: Operational Monitoring & Alerts
 
-#### 1. Water Quality Metrics — time-series line chart
+![Operational Monitoring & Alerts dashboard](docs/images/dashboard.png)
 
-```sql
-SELECT
-  event_timestamp AS "time",
-  ph AS "pH Level",
-  turbidity AS "Turbidity"
-FROM water_quality_readings
-WHERE $__timeFilter(event_timestamp)
-ORDER BY event_timestamp ASC;
-```
+This dashboard focuses on real-time system state and geographical comparisons,
+turning raw telemetry into an operational control centre.
 
-#### 2. Latest current readings — stat or gauge cards
+- **Critical Alerts (Anomalies):** Isolates readings that breach safety
+  thresholds, such as extreme pH or high turbidity, so hazardous conditions are
+  visible by time and station.
+- **Latest Current Readings:** Gauge cards show the most recent payload.
+  `COALESCE` supplies a safe fallback for missing values, allowing occasional
+  dropped sensor fields without breaking the visual interface.
+- **Average Metrics by Station:** A bar chart compares average pH and turbidity
+  by location, identifying stations with higher baseline contamination.
+- **Streamflow & Conductance:** An area chart relates water volume to dissolved
+  particles over time, helping indicate dilution or new pollutant introduction.
+- **Temperature & Dissolved Oxygen:** A line chart establishes baseline aquatic
+  health conditions for the selected time range.
 
-```sql
-SELECT
-  COALESCE(ph, 0) AS "Current pH",
-  COALESCE(turbidity, 0) AS "Current Turbidity",
-  COALESCE(temperature, 0) AS "Current Temp"
-FROM water_quality_readings
-ORDER BY event_timestamp DESC
-LIMIT 1;
-```
+### Dashboard 2: Advanced Trend Analysis & Diagnostics
 
-#### 3. Temperature and dissolved oxygen — time-series line chart
+![Advanced Trend Analysis & Diagnostics dashboard](docs/images/dashboard-2.png)
 
-```sql
-SELECT
-  event_timestamp AS "time",
-  temperature AS "Temperature",
-  dissolved_oxygen AS "Dissolved Oxygen"
-FROM water_quality_readings
-WHERE $__timeFilter(event_timestamp)
-ORDER BY event_timestamp ASC;
-```
+This dashboard uses time bucketing and window functions to reduce noisy IoT
+signals and expose physical environmental relationships.
 
-#### 4. Critical alerts and anomalies — table
+- **pH Volatility Profile:** Displays minimum, average, and maximum pH
+  side-by-side. A normal average with wide extremes signals chemical
+  instability.
+- **Hourly Contaminant Averages:** Groups five-minute telemetry into hourly
+  buckets, exposing macro-trends and recurring dissolved-pollutant spikes.
+- **Suffocation Correlation:** A dual-axis comparison of temperature and
+  dissolved oxygen demonstrates their inverse relationship and highlights
+  periods of aquatic-life risk.
+- **The Sediment Kick-Up:** Overlays streamflow and turbidity to test whether
+  fast water movement is disturbing sediment and reducing clarity.
+- **The Flash Flood Indicator:** Uses `LAG()` to calculate the change in flow
+  between readings. Positive spikes indicate surges; negative spikes indicate
+  sudden drops or possible upstream blockages.
 
-```sql
-SELECT
-  event_timestamp AS "Time",
-  station_id AS "Station ID",
-  ph AS "pH Level",
-  turbidity AS "Turbidity"
-FROM water_quality_readings
-WHERE ph < 6.5 OR ph > 8.5 OR turbidity > 15
-ORDER BY event_timestamp DESC
-LIMIT 10;
-```
+### Panel query library
 
-#### 5. Streamflow and conductance — filled area chart
-
-```sql
-SELECT
-  event_timestamp AS "time",
-  streamflow AS "Streamflow (cfs)",
-  specific_conductance AS "Conductance"
-FROM water_quality_readings
-WHERE $__timeFilter(event_timestamp)
-ORDER BY event_timestamp ASC;
-```
+[`sql/dashboard-queries.sql`](sql/dashboard-queries.sql) contains the exact
+SQL for all ten panels, grouped by dashboard and annotated with purpose and
+recommended visualization. Grafana expands `$__timeFilter(event_timestamp)`
+to the time range selected in the dashboard.
 
 ### Public dashboard
 
-[Open the Water Quality Grafana Dashboard](https://sereneiris1223.grafana.net/public-dashboards/f9fb0a33a28f43ac878b03267ebce7d3)
+[Open Dashboard 1: Operational Monitoring & Alerts](https://sereneiris1223.grafana.net/public-dashboards/f9fb0a33a28f43ac878b03267ebce7d3)
+
+[Open Dashboard 2: Advanced Trend Analysis & Diagnostics](https://sereneiris1223.grafana.net/public-dashboards/b51107f651d8479b9544615dd2edd2f5)
 
 ## Local development and deployment
 
